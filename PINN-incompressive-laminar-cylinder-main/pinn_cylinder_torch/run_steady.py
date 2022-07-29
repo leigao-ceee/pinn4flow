@@ -2,11 +2,10 @@ import matplotlib.tri
 import numpy as np
 import torch
 import torch.nn as nn
-from basic_model import DeepModel_single, DeepModel_multi, gradients
+from basic_model import DeepModel_single, gradients
 from visual_data import matplotlib_vision
 
 import time
-from tqdm import trange
 import matplotlib.pyplot as plt
 
 #################################### 定义网络框架 ###################################################################
