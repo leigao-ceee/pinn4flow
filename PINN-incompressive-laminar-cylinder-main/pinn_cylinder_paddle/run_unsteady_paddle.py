@@ -245,6 +245,7 @@ def inference(inn_var, model):
     equation, _ = model.equation(inn_var, out_var)
     return out_var.detach().cpu(), equation.detach().cpu()
 
+
 if __name__ == '__main__':
 
     name = 'trans-cylinder-2d-mixed-'
@@ -286,6 +287,8 @@ if __name__ == '__main__':
     L2Loss = nn.MSELoss()
     Net_model = Net(planes=[3] + 5 * [50] + [5], rho=Rho, miu=Miu)
     Optimizer_1 = paddle.optimizer.Adam(parameters=Net_model.parameters(), learning_rate=0.0005, beta1=0.9, beta2=0.999)
+    Boundary_epoch_1 = [100000, 150000, 200000]
+    Scheduler_1 = paddle.optimizer.lr.MultiStepDecay(learning_rate=0.0005, milestones=Boundary_epoch_1, gamma=0.1)
     # Optimizer_2 = paddle.incubate.optimizer.functional.minimize_lbfgs(parameters=Net_model.parameters(), learning_rate=.1, max_iter=100)
     Boundary_epoch = [200000, 250000, 300000]
     # Scheduler_2 = paddle.optim.lr_scheduler.MultiStepLR(Optimizer_2, milestones=Boundary_epoch, gamma=0.1)
@@ -300,15 +303,15 @@ if __name__ == '__main__':
     for epoch in range(Boundary_epoch[-1]):
         # 如果GPU内存不充足，可以分批次进行训练
         if epoch < 10000:
-            iter = 2
+            iter = 1
             for i in range(iter):
                 data_itr = list(map(lambda x: x[i * int(x.shape[0] / iter):(i + 1) * int(x.shape[0] / iter)], data))
                 input = data_itr[0]
                 input = paddle.to_tensor(input[:, :3], dtype='float32', place='gpu:0')
                 BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[5])  ## 边界数据
                 field = data_itr[4]  ##检测的流场点
-                train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, log_loss)
-            learning_rate = 0.0005
+                train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, Scheduler_1, log_loss)
+            learning_rate = Scheduler_1.get_lr()
         # if epoch >= 10000:
         #     iter = 2
         #     for i in range(iter):
@@ -319,7 +322,8 @@ if __name__ == '__main__':
         #         field = data_itr[4]  ##检测的流场点
         #         train_LBFGS(input, BCs, field, Net_model, L2Loss, Optimizer_2, Scheduler_2, log_loss)
         #     learning_rate = Optimizer_2.state_dict()['param_groups'][0]['lr']
-        if epoch > 0 and epoch % 2000 == 0:
+
+        if epoch > 0 and epoch % 500 == 0:
             print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
                   format(epoch, learning_rate, time.time() - star_time,
                          log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
