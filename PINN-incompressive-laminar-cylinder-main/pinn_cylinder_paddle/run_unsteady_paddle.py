@@ -343,7 +343,7 @@ if __name__ == '__main__':
                 # train_LBFGS(input, BCs, field, Net_model, L2Loss, Optimizer_2, Scheduler_2, log_loss)
             learning_rate = Optimizer_2.state_dict()['param_groups'][0]['lr']
 
-        if epoch > 0 and epoch % 200 == 0:
+        if epoch > 0 and epoch % 500 == 0:
             print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
                   format(epoch, learning_rate, time.time() - star_time,
                          log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
