@@ -55,6 +55,17 @@ class Net(FCNet):
 
         return eqs, paddle.concat((dpdy, dudy, dvdy), axis=-1)
 
+    def loadmodel(self, File):
+        try:
+            checkpoint = paddle.load(File)
+            self.set_state_dict(checkpoint['model'])  # 从字典中依次读取  ! 可能有问题
+            start_epoch = checkpoint['epoch']
+            print("load start epoch at epoch " + str(start_epoch))
+            Log_loss = checkpoint['log_loss'].tolist()
+            return Log_loss
+        except:
+            print("load model failed！ start a new model.")
+            return []
 ######################## 获取 nodes 在 box 流域内的边界节点  ########################
 def BCS_ICS(nodes, box):
     BCS = []
@@ -173,7 +184,7 @@ def replicate_time_list(time_list, domain_shape, spatial_data):
     return spatial_data
 
 
-def fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss, optimizer):
+def fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss):
     BC_in = paddle.to_tensor(BCs[0][..., 0:3], dtype='float32', place='gpu:0')
     BC_out = paddle.to_tensor(BCs[1][..., 0:3], dtype='float32', place='gpu:0')
     BC_top = paddle.to_tensor(BCs[2][..., 0:3], dtype='float32', place='gpu:0')
@@ -198,7 +209,6 @@ def fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss, optimiz
     BC_wall.stop_gradient = False
     BC_initial.stop_gradient = False
     field_supervised.stop_gradient = False
-    optimizer.clear_grad()
 
     out_var = model.nn_func(inn_var)
     out_var = model.output_transform(inn_var, out_var)
@@ -253,30 +263,41 @@ def fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss, optimiz
 ################################## 单次训练步骤  ##################################
 def train_adam(inn_var, BCs, out_true, model, Loss, optimizer, scheduler, log_loss):
 
-    loss_batch, log_loss = fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss, optimizer)
+    loss_batch, log_loss = fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss)
     loss_batch.backward()
     optimizer.step()
-
+    optimizer.clear_grad()
     scheduler.step()
 
 
-def train_bfgs(inn_var, BCs, out_true, model, Loss, log_loss, num_epoch=1):
+def train_bfgs(work_path, data, triang, inn_var, BCs, out_true, model, Loss, log_loss, num_epoch):
 
     def _f(x):
         nonlocal inn_var, BCs, out_true, log_loss
         model.reconstruct(x)
-        loss_batch, log_loss = fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss, optimizer)
+        loss_batch, log_loss = fwd_computing_loss_2d(inn_var, BCs, out_true, model, Loss, log_loss)
         return loss_batch
 
     x0 = model.flatten_params()
-
-    for epoch_id in range(num_epoch):
+    star_time = time.time()
+    for epoch in range(num_epoch):
         results = paddle.incubate.optimizer.functional.minimize_bfgs(_f,
                                                                      x0,
+                                                                     max_iters=20,
+                                                                     tolerance_grad=1e-7,
                                                                      initial_inverse_hessian_estimate=None,
                                                                      line_search_fn='strong_wolfe',
-                                                                     dtype='float32', max_iters=10)
+                                                                     max_line_search_iters=25,
+                                                                     initial_step_length=0.01,
+                                                                     dtype='float32')
         x0 = results[2]
+        print('proceed to epoch: {:6d}, cost: {: .2e}'.format(epoch, time.time() - star_time))
+        if epoch > 0 and epoch % 10 == 0:
+            print('epoch: {:6d}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
+                  format(epoch, time.time() - star_time,
+                         log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
+            star_time = plot_write(work_path, epoch+5000, data, triang, log_loss, model)
+
 
 ################################## 预测  ##################################
 def inference(inn_var, model):
@@ -286,6 +307,66 @@ def inference(inn_var, model):
     out_var = model.output_transform(inn_var, out_var)
     equation, _ = model.equation(inn_var, out_var)
     return out_var.detach().cpu(), equation.detach().cpu()
+
+
+def plot_write(work_path, epoch, data, triang, log_loss, Net_model):
+    # 损失曲线
+    plt.figure(1, figsize=(15, 5))
+    plt.clf()
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, -1], 'dat_loss')
+    plt.savefig(os.path.join(work_path, 'log_loss.svg'))
+
+    # 详细的损失曲线
+    plt.figure(2, figsize=(15, 10))
+    plt.clf()
+    plt.subplot(211)
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+    plt.subplot(212)
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 2], 'top_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 3], 'bot_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 4], 'wall_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 5], 'in_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 6], 'out_loss')
+    Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 7], 'ini_loss')
+    plt.savefig(os.path.join(work_path, 'detail_loss.svg'))
+
+    # 根据模型预测流场， 若有真实场，则与真实场对比
+    input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+    input_visual_p[:, -1] = input_visual_p[:, -1]  # 时间取最大
+    field_visual_p, _ = inference(input_visual_p, Net_model)
+    field_visual_t = data[-1][..., 3:]
+    field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+    # field_visual_t = field_visual_p
+
+    plt.figure(3, figsize=(30, 8))
+    plt.clf()
+    Visual.plot_fields_tr(field_visual_t, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+
+    # plt.savefig(res_path + 'field_' + str(t) + '-' + str(epoch) + '.jpg')
+    plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + '.jpg'), dpi=200)
+    plt.savefig(os.path.join(work_path, 'global_now.jpg'))
+
+    for i in range(5):
+        input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+        tim = (i + 1) * 10
+        input_visual_p[:, -1] = input_visual_p[:, -1] - 1 + tim  # 时间
+        field_visual_p, _ = inference(input_visual_p, Net_model)
+        field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+        # field_visual_t = field_visual_p
+
+        plt.figure(3, figsize=(30, 8))
+        plt.clf()
+        Visual.plot_fields_tr(field_visual_p, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+
+        plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + 'time' + str(tim) + '.jpg'), dpi=200)
+
+    paddle.save({'epoch': epoch, 'model': Net_model.state_dict(), 'log_loss': log_loss},
+                os.path.join(work_path, 'latest_model.pth'))
+    star_time = time.time()
+    return star_time
 
 
 if __name__ == '__main__':
@@ -328,12 +409,12 @@ if __name__ == '__main__':
     #################### 定义损失函数、优化器以及网络结构 ####################
     L2Loss = nn.MSELoss()
     # Net_model = Net(planes=[3] + 7 * [50] + [5], rho=Rho, miu=Miu)
-    Net_model = Net(planes=[3, 5, 7, 50], rho=Rho, miu=Miu)
-    Boundary_epoch_1 = [100000, 200000]
+    Net_model = Net(planes=[3, 5, 5, 40], rho=Rho, miu=Miu)
+    Boundary_epoch_1 = [2500, 5000]
     Scheduler_1 = paddle.optimizer.lr.MultiStepDecay(learning_rate=0.0005, milestones=Boundary_epoch_1, gamma=0.1)
     Optimizer_1 = paddle.optimizer.Adam(parameters=Net_model.parameters(), learning_rate=Scheduler_1, beta1=0.9,
                                         beta2=0.999)
-    Boundary_epoch_2 = [200000, 250000, 300000]
+    Boundary_epoch_2 = [2000]
     Scheduler_2 = paddle.optimizer.lr.MultiStepDecay(learning_rate=0.0005, milestones=Boundary_epoch_2, gamma=0.1)
     Optimizer_2 = paddle.optimizer.Adam(parameters=Net_model.parameters(), learning_rate=Scheduler_2, beta1=0.9,
                                         beta2=0.999)
@@ -345,91 +426,40 @@ if __name__ == '__main__':
     log_loss = []
 
     """load a pre-trained model"""
-    # Net_model.loadmodel(work_path + '\\latest_model.pth')
-    for epoch in range(Boundary_epoch_2[-1]):
-        # 如果GPU内存不充足，可以分批次进行训练
-        if epoch < 200000:
-            iter = 3
-            for i in range(iter):
-                data_itr = list(map(lambda x: x[i * int(x.shape[0] / iter):(i + 1) * int(x.shape[0] / iter)], data))
-                input = data_itr[0]
-                input = paddle.to_tensor(input[:, :3], dtype='float32', place='gpu:0')
-                BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[4], data_itr[5], data_itr[-1])  ## 边界数据
-                field = data_itr[-2]  ##检测的流场点
-                train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, Scheduler_1, log_loss)
-                # train_bfgs(input, BCs, field, Net_model, L2Loss, log_loss)
-            learning_rate = Scheduler_1.get_lr()
-            # learning_rate = 0.01
-        if epoch >= 200000:
-            iter = 3
-            for i in range(iter):
-                data_itr = list(map(lambda x: x[i * int(x.shape[0] / iter):(i + 1) * int(x.shape[0] / iter)], data))
-                input = data_itr[0]
-                input = paddle.to_tensor(input[:, :3], dtype='float32', place='gpu:0')
-                BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[4], data_itr[5], data_itr[-1])  ## 边界数据
-                field = data_itr[4]  ##检测的流场点
-                train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_2, Scheduler_2, log_loss)
-                # train_LBFGS(input, BCs, field, Net_model, L2Loss, Optimizer_2, Scheduler_2, log_loss)
-            learning_rate = Optimizer_2.state_dict()['param_groups'][0]['lr']
-
-        if epoch > 0 and epoch % 500 == 0:
-            print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
-                  format(epoch, learning_rate, time.time() - star_time,
-                         log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
-            star_time = time.time()
-
-            # 损失曲线
-            plt.figure(1, figsize=(15, 5))
-            plt.clf()
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, -1], 'dat_loss')
-            plt.savefig(os.path.join(work_path, 'log_loss.svg'))
-
-            # 详细的损失曲线
-            plt.figure(2, figsize=(15, 10))
-            plt.clf()
-            plt.subplot(211)
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
-            plt.subplot(212)
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 2], 'top_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 3], 'bot_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 4], 'wall_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 5], 'in_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 6], 'out_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 7], 'ini_loss')
-            plt.savefig(os.path.join(work_path, 'detail_loss.svg'))
-
-            # 根据模型预测流场， 若有真实场，则与真实场对比
-            input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
-            input_visual_p[:, -1] = input_visual_p[:, -1]  # 时间取最大
-            field_visual_p, _ = inference(input_visual_p, Net_model)
-            field_visual_t = data[-1][..., 3:]
-            field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
-            # field_visual_t = field_visual_p
-
-            plt.figure(3, figsize=(30, 8))
-            plt.clf()
-            Visual.plot_fields_tr(field_visual_t, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
-
-            # plt.savefig(res_path + 'field_' + str(t) + '-' + str(epoch) + '.jpg')
-            plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + '.jpg'), dpi=200)
-            plt.savefig(os.path.join(work_path, 'global_now.jpg'))
-
-            for i in range(5):
-                input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
-                tim = (i+1)*10
-                input_visual_p[:, -1] = input_visual_p[:, -1] -1 + tim# 时间
-                field_visual_p, _ = inference(input_visual_p, Net_model)
-                field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
-                # field_visual_t = field_visual_p
-
-                plt.figure(3, figsize=(30, 8))
-                plt.clf()
-                Visual.plot_fields_tr(field_visual_p, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
-
-                plt.savefig(os.path.join(work_path, 'global_' + str(epoch) +'time'+str(tim)  + '.jpg'), dpi=200)
-
-            paddle.save({'epoch': epoch, 'model': Net_model.state_dict(), },
-                        os.path.join(work_path, 'latest_model.pth'))
+    log_loss = Net_model.loadmodel(work_path + '\\latest_model.pth')
+    # for epoch in range(Boundary_epoch_1[-1]):
+    #     train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, Scheduler_1, log_loss)
+    #     if epoch > 0 and epoch % 500 == 0:
+    #         learning_rate = Scheduler_1.get_lr()
+    #         print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
+    #               format(epoch, learning_rate, time.time() - star_time,
+    #                      log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
+    #         star_time = plot_write(work_path, epoch, data, triang, log_loss, Net_model)
+    train_bfgs(work_path, data, triang, input, BCs, field, Net_model, L2Loss, log_loss, Boundary_epoch_2[-1])
+    # for epoch in range(Boundary_epoch_2[-1]):
+    #     # 如果GPU内存不充足，可以分批次进行训练
+    #     if epoch < 200000:
+            # iter = 3
+            # for i in range(iter):
+            #     data_itr = list(map(lambda x: x[i * int(x.shape[0] / iter):(i + 1) * int(x.shape[0] / iter)], data))
+            #     input = data_itr[0]
+            #     input = paddle.to_tensor(input[:, :3], dtype='float32', place='gpu:0')
+            #     BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[4], data_itr[5], data_itr[-1])  ## 边界数据
+            #     field = data_itr[-2]  ##检测的流场点
+                # train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, Scheduler_1, log_loss)
+            # learning_rate = Scheduler_1.get_lr()
+            # if epoch > 0 and epoch % 200 == 0:
+            #     print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
+            #           format(epoch, learning_rate, time.time() - star_time,
+            #                  log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
+            #     star_time = plot_write(work_path, epoch, data, triang, log_loss, Net_model)
+        # if epoch >= 200000:
+        #     iter = 3
+        #     for i in range(iter):
+        #         data_itr = list(map(lambda x: x[i * int(x.shape[0] / iter):(i + 1) * int(x.shape[0] / iter)], data))
+        #         input = data_itr[0]
+        #         input = paddle.to_tensor(input[:, :3], dtype='float32', place='gpu:0')
+        #         BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[4], data_itr[5], data_itr[-1])  ## 边界数据
+        #         field = data_itr[4]  ##检测的流场点
+        #         # train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_2, Scheduler_2, log_loss)
+        #     learning_rate = Optimizer_2.state_dict()['param_groups'][0]['lr']
