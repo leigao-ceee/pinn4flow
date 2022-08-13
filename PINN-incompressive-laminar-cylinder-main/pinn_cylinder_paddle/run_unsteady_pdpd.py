@@ -311,6 +311,70 @@ def inference(inn_var, model):
     return out_var.detach().cpu(), equation.detach().cpu()
 
 
+def plot_write(epoch, period, learning_rate, start_time, work_path, data, log_loss, triang, Net_model):
+    if epoch > 0 and epoch % period == 0:
+        print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
+              format(epoch, learning_rate, time.time() - start_time,
+                     log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
+        start_time = time.time()
+        # 损失曲线
+        plt.figure(1, figsize=(15, 5))
+        plt.clf()
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, -1], 'dat_loss')
+        plt.savefig(os.path.join(work_path, 'log_loss.svg'))
+
+        # 详细的损失曲线
+        plt.figure(2, figsize=(15, 10))
+        plt.clf()
+        plt.subplot(211)
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+        plt.subplot(212)
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 2], 'top_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 3], 'bot_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 4], 'wall_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 5], 'in_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 6], 'out_loss')
+        Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 7], 'ini_loss')
+        plt.savefig(os.path.join(work_path, 'detail_loss.svg'))
+
+        # 根据模型预测流场， 若有真实场，则与真实场对比
+        input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+        input_visual_p[:, -1] = input_visual_p[:, -1]  # 时间取最大
+        field_visual_p, _ = inference(input_visual_p, Net_model)
+        field_visual_t = data[-1][..., 3:]
+        field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+        # field_visual_t = field_visual_p
+
+        plt.figure(3, figsize=(30, 8))
+        plt.clf()
+        Visual.plot_fields_tr(field_visual_t, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+
+        # plt.savefig(res_path + 'field_' + str(t) + '-' + str(epoch) + '.jpg')
+        plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + '.jpg'), dpi=200)
+        plt.savefig(os.path.join(work_path, 'global_now.jpg'))
+
+        for i in range(5):
+            input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+            tim = (i + 1) * 10
+            input_visual_p[:, -1] = input_visual_p[:, -1] - 1 + tim  # 时间
+            field_visual_p, _ = inference(input_visual_p, Net_model)
+            field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+            # field_visual_t = field_visual_p
+
+            plt.figure(3, figsize=(30, 8))
+            plt.clf()
+            Visual.plot_fields_tr(field_visual_p, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+
+            plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + 'time' + str(tim) + '.jpg'), dpi=200)
+
+        paddle.save({'epoch': epoch, 'model': Net_model.state_dict(), 'log_loss': log_loss},
+                    os.path.join(work_path, 'latest_model.pth'))
+    return start_time
+
+
 if __name__ == '__main__':
     name = 'trans-cylinder-2d-mixed-'
     work_path = os.path.join('work', name)
@@ -364,7 +428,7 @@ if __name__ == '__main__':
     Visual = matplotlib_vision('/', field_name=('p', 'u', 'v'), input_name=('x', 'y'))
 
     ################################### 训练 #####################################
-    star_time = time.time()
+    start_time = time.time()
     log_loss = []
 
     """load a pre-trained model"""
@@ -382,7 +446,7 @@ if __name__ == '__main__':
                 train_adam(input, BCs, field, Net_model, L2Loss, Optimizer_1, Scheduler_1, log_loss)
                 # train_lbfgs(input, BCs, field, Net_model, L2Loss, log_loss)
             learning_rate = Scheduler_1.get_lr()
-
+            start_time = plot_write(epoch, 2000, learning_rate, start_time, work_path, data, log_loss, triang, Net_model)
         if epoch >= Boundary_epoch_1[-1]:
             if epoch <= Boundary_epoch_1[-1] + Boundary_epoch_2[0]:
                 learning_rate = lr_lbfgs[0]
@@ -398,65 +462,66 @@ if __name__ == '__main__':
                 BCs = (data_itr[1], data_itr[2], data_itr[3], data_itr[4], data_itr[5], data_itr[-1])  ## 边界数据
                 field = data_itr[4]  ##检测的流场点
                 train_lbfgs(input, BCs, field, Net_model, L2Loss, log_loss, learning_rate)
-
-        print('proceed to epoch: {:6d}, cost: {: .2e}'.format(epoch, time.time() - star_time))
-        if epoch > 0 and epoch % 1000 == 0:
-            print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
-                  format(epoch, learning_rate, time.time() - star_time,
-                         log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
-            star_time = time.time()
-            # 损失曲线
-            plt.figure(1, figsize=(15, 5))
-            plt.clf()
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, -1], 'dat_loss')
-            plt.savefig(os.path.join(work_path, 'log_loss.svg'))
-
-            # 详细的损失曲线
-            plt.figure(2, figsize=(15, 10))
-            plt.clf()
-            plt.subplot(211)
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
-            plt.subplot(212)
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 2], 'top_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 3], 'bot_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 4], 'wall_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 5], 'in_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 6], 'out_loss')
-            Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 7], 'ini_loss')
-            plt.savefig(os.path.join(work_path, 'detail_loss.svg'))
-
-            # 根据模型预测流场， 若有真实场，则与真实场对比
-            input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
-            input_visual_p[:, -1] = input_visual_p[:, -1]  # 时间取最大
-            field_visual_p, _ = inference(input_visual_p, Net_model)
-            field_visual_t = data[-1][..., 3:]
-            field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
-            # field_visual_t = field_visual_p
-
-            plt.figure(3, figsize=(30, 8))
-            plt.clf()
-            Visual.plot_fields_tr(field_visual_t, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
-
-            # plt.savefig(res_path + 'field_' + str(t) + '-' + str(epoch) + '.jpg')
-            plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + '.jpg'), dpi=200)
-            plt.savefig(os.path.join(work_path, 'global_now.jpg'))
-
-            for i in range(5):
-                input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
-                tim = (i+1)*10
-                input_visual_p[:, -1] = input_visual_p[:, -1] -1 + tim# 时间
-                field_visual_p, _ = inference(input_visual_p, Net_model)
-                field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
-                # field_visual_t = field_visual_p
-
-                plt.figure(3, figsize=(30, 8))
-                plt.clf()
-                Visual.plot_fields_tr(field_visual_p, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
-
-                plt.savefig(os.path.join(work_path, 'global_' + str(epoch) +'time'+str(tim)  + '.jpg'), dpi=200)
-
-            paddle.save({'epoch': epoch, 'model': Net_model.state_dict(), 'log_loss': log_loss},
-                        os.path.join(work_path, 'latest_model.pth'))
+            start_time = plot_write(epoch, 100, learning_rate, start_time, work_path, data, log_loss, triang,
+                                    Net_model)
+        # print('proceed to epoch: {:6d}, cost: {: .2e}'.format(epoch, time.time() - start_time))
+        # if epoch > 0 and epoch % 1000 == 0:
+        #     print('epoch: {:6d}, lr: {:.1e}, cost: {:.2e}, dat_loss: {:.2e}, eqs_loss: {:.2e}, bcs_loss: {:.2e}'.
+        #           format(epoch, learning_rate, time.time() - start_time,
+        #                  log_loss[-1][-1], log_loss[-1][0], log_loss[-1][1], ))
+        #     start_time = time.time()
+        #     # 损失曲线
+        #     plt.figure(1, figsize=(15, 5))
+        #     plt.clf()
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, -1], 'dat_loss')
+        #     plt.savefig(os.path.join(work_path, 'log_loss.svg'))
+        #
+        #     # 详细的损失曲线
+        #     plt.figure(2, figsize=(15, 10))
+        #     plt.clf()
+        #     plt.subplot(211)
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 0], 'eqs_loss')
+        #     plt.subplot(212)
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 1], 'bcs_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 2], 'top_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 3], 'bot_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 4], 'wall_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 5], 'in_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 6], 'out_loss')
+        #     Visual.plot_loss(np.arange(len(log_loss)), np.array(log_loss)[:, 7], 'ini_loss')
+        #     plt.savefig(os.path.join(work_path, 'detail_loss.svg'))
+        #
+        #     # 根据模型预测流场， 若有真实场，则与真实场对比
+        #     input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+        #     input_visual_p[:, -1] = input_visual_p[:, -1]  # 时间取最大
+        #     field_visual_p, _ = inference(input_visual_p, Net_model)
+        #     field_visual_t = data[-1][..., 3:]
+        #     field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+        #     # field_visual_t = field_visual_p
+        #
+        #     plt.figure(3, figsize=(30, 8))
+        #     plt.clf()
+        #     Visual.plot_fields_tr(field_visual_t, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+        #
+        #     # plt.savefig(res_path + 'field_' + str(t) + '-' + str(epoch) + '.jpg')
+        #     plt.savefig(os.path.join(work_path, 'global_' + str(epoch) + '.jpg'), dpi=200)
+        #     plt.savefig(os.path.join(work_path, 'global_now.jpg'))
+        #
+        #     for i in range(5):
+        #         input_visual_p = paddle.to_tensor(data[-1][..., :3], dtype='float32', place='gpu:0')  # 取初场的空间坐标
+        #         tim = (i+1)*10
+        #         input_visual_p[:, -1] = input_visual_p[:, -1] -1 + tim# 时间
+        #         field_visual_p, _ = inference(input_visual_p, Net_model)
+        #         field_visual_p = field_visual_p.cpu().numpy()[..., 0:3]
+        #         # field_visual_t = field_visual_p
+        #
+        #         plt.figure(3, figsize=(30, 8))
+        #         plt.clf()
+        #         Visual.plot_fields_tr(field_visual_p, field_visual_p, input_visual_p.detach().cpu().numpy(), triang)
+        #
+        #         plt.savefig(os.path.join(work_path, 'global_' + str(epoch) +'time'+str(tim)  + '.jpg'), dpi=200)
+        #
+        #     paddle.save({'epoch': epoch, 'model': Net_model.state_dict(), 'log_loss': log_loss},
+        #                 os.path.join(work_path, 'latest_model.pth'))
